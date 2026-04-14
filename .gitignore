@@ -1,0 +1,33 @@
+# Dependencies
+node_modules/
+
+# Vite build output
+dist/
+
+# Local env and secrets
+.env
+.env.*
+!.env.example
+
+# Logs and debug
+*.log
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Editor and OS
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# TypeScript
+*.tsbuildinfo
+
+# Optional: Vite cache (safe to ignore; regenerated)
+.vite/
+
+# Test / coverage (if you add them later)
+coverage/
