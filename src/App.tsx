@@ -2,6 +2,7 @@ import { Spinner, Text } from '@kittl/ui-react';
 
 import { ConnectPanel } from './components/ConnectPanel';
 import { EmptyState } from './components/EmptyState';
+import { ExportFooter } from './components/ExportFooter';
 import { FileGrid } from './components/FileGrid';
 import { Header } from './components/Header';
 import { useDropbox } from './hooks/useDropbox';
@@ -48,6 +49,10 @@ export function App() {
       )}
 
       {dbx.error && <Text variant="p3" color="critical">{dbx.error}</Text>}
+
+      {dbx.token && dbx.selectedIds.length > 0 && (
+        <ExportFooter exporting={dbx.exporting} onExport={dbx.exportToDropbox} />
+      )}
     </div>
   );
 }

@@ -7,6 +7,7 @@ const URL = {
   listFolderMore: `${API}/files/list_folder/continue`,
   tempLink:       `${API}/files/get_temporary_link`,
   thumbnailBatch: `${CONTENT_API}/files/get_thumbnail_batch`,
+  upload:         `${CONTENT_API}/files/upload`,
 } as const;
 
 /** A single entry returned by the Dropbox list_folder API. */
@@ -115,6 +116,35 @@ export async function getTemporaryLink(token: string, fileId: string): Promise<s
     throw new Error('Could not get file link. Please try again.');
   });
   return data.link;
+}
+
+/**
+ * Uploads a `Blob` to the given Dropbox path.
+ * Uses `autorename: true` so concurrent exports never collide.
+ * Requires the `files.content.write` OAuth scope.
+ *
+ * @param path - Absolute Dropbox path, e.g. `/Kittl Exports/design-2026.png`.
+ */
+export async function uploadFile(token: string, path: string, blob: Blob): Promise<void> {
+  const res = await fetch(URL.upload, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/octet-stream',
+      'Dropbox-API-Arg': JSON.stringify({
+        path,
+        mode: 'add',
+        autorename: true,
+        mute: false,
+      }),
+    },
+    body: blob,
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    console.error('[Dropbox] upload failed:', res.status, text.slice(0, 200));
+    throw new Error('Could not upload to Dropbox. Please try again.');
+  }
 }
 
 /**

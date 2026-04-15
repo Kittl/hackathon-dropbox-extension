@@ -4,6 +4,8 @@ import '@kittl/ui-tokens/styles.css';
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 
+import { ToastProvider } from '@kittl/ui-react';
+
 import { App } from './App';
 
 const rootEl = document.getElementById('root');
@@ -13,6 +15,8 @@ if (!rootEl) {
 
 createRoot(rootEl).render(
   <StrictMode>
-    <App />
+    <ToastProvider>
+      <App />
+    </ToastProvider>
   </StrictMode>,
 );

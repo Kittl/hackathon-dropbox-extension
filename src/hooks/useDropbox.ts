@@ -1,9 +1,10 @@
 import { kittl } from '@kittl/sdk';
+import { useToast } from '@kittl/ui-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { DBX_PROVIDER, FILES_ONLY_KEY, PAGE_SIZE } from '../constants';
 import type { DbxEntry } from '../lib/dropbox';
-import { getHomeNamespaceId, getTemporaryLink, getThumbnails, streamFiles } from '../lib/dropbox';
+import { getHomeNamespaceId, getTemporaryLink, getThumbnails, streamFiles, uploadFile } from '../lib/dropbox';
 import { canAddToCanvas } from '../lib/fileHelpers';
 
 /**
@@ -25,8 +26,11 @@ type NsState = string | null | 'pending';
  * - Lazy thumbnail fetching (only for items in the visible slice).
  * - Folder navigation with a path stack.
  * - Adding canvas-supported images to the Kittl design via `kittl.design.image.addImage`.
+ * - Polling canvas selection every 500ms to drive the contextual export footer.
+ * - Exporting selected canvas objects as PNG and uploading them to Dropbox.
  */
 export function useDropbox() {
+  const { showToast } = useToast();
   const [token, setToken] = useState<string | null>(null);
   const [initializing, setInitializing] = useState(true);
   const [nsId, setNsId] = useState<NsState>('pending');
@@ -38,6 +42,8 @@ export function useDropbox() {
   const [filesOnlyMode, setFilesOnlyMode] = useState(() => localStorage.getItem(FILES_ONLY_KEY) === 'true');
   const [loading, setLoading] = useState(false);
   const [adding, setAdding] = useState<string | null>(null);
+  const [exporting, setExporting] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   /** Tracks which file IDs have already had thumbnail requests sent. */
@@ -196,6 +202,54 @@ export function useDropbox() {
     });
   }, []);
 
+  // Poll canvas selection every 500ms while connected — no push API exists in the SDK
+  useEffect(() => {
+    if (!token) { setSelectedIds([]); return; }
+    const tick = async () => {
+      const res = await kittl.state.getSelectedObjectsIds();
+      if (!res.isOk) return;
+      setSelectedIds((prev) => {
+        const next = res.result;
+        // Avoid re-render when the selection hasn't changed
+        if (prev.length === next.length && prev.every((id, i) => id === next[i])) return prev;
+        return next;
+      });
+    };
+    tick(); // run immediately so there's no initial 500ms delay
+    const id = setInterval(tick, 500);
+    return () => clearInterval(id);
+  }, [token]);
+
+  /**
+   * Exports the current canvas selection as PNG and uploads it to
+   * `/Kittl Exports/<timestamp>.png` in the user's Dropbox.
+   * Uses `autorename` so concurrent exports never overwrite each other.
+   */
+  const exportToDropbox = useCallback(async () => {
+    if (!token || !selectedIds.length || exporting) return;
+    setExporting(true);
+    try {
+      const exportRes = await kittl.design.canvas.getExport({
+        format: 'png',
+        target: { nodeIds: selectedIds },
+        dimensions: { multiplier: 2 },
+      });
+      if (!exportRes.isOk) {
+        console.error('[Export] getExport failed:', exportRes.error);
+        throw new Error('Export failed.');
+      }
+      if (!exportRes.result) throw new Error('Export returned empty result.');
+      const timestamp = new Date().toISOString().slice(0, 19).replace(/[T:]/g, '-');
+      await uploadFile(token, `/Kittl Exports/export-${timestamp}.png`, exportRes.result);
+      showToast('Exported to Dropbox!', 'success');
+    } catch (err) {
+      console.error('[Export] exportToDropbox failed:', err);
+      showToast('Could not export to Dropbox.', 'error');
+    } finally {
+      setExporting(false);
+    }
+  }, [token, selectedIds, exporting]);
+
   /**
    * Fetches a temporary download link for the file and adds it to the Kittl
    * canvas at the center of the viewport. Only canvas-supported images are
@@ -246,6 +300,10 @@ export function useDropbox() {
     openFolder,
     adding,
     addToCanvas,
+    // Export
+    selectedIds,
+    exporting,
+    exportToDropbox,
     // Refs
     scrollRef,
   };

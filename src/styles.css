@@ -94,6 +94,23 @@ html, body, #root {
   padding: var(--spacing-4) 0;
 }
 
+/* ─── Export footer ───────────────────────────────────────────────────────────── */
+
+.export-footer {
+  padding-top: var(--spacing-8);
+  border-top: 1px solid var(--color-border-default);
+}
+
+.export-footer kittl-button {
+  width: 100%;
+}
+
+.export-footer-icon {
+  width: 22px;
+  height: 22px;
+  filter: brightness(0) invert(1);
+}
+
 /* ─── Empty state ─────────────────────────────────────────────────────────────── */
 
 .empty-state {

@@ -22,7 +22,7 @@
     "oauthProviders": {
       "dropbox": {
         "clientId": "qkcenabcj9he44a",
-        "scope": "files.metadata.read files.content.read account_info.read",
+        "scope": "files.metadata.read files.content.read files.content.write account_info.read",
         "authorizationUrl": "https://www.dropbox.com/oauth2/authorize",
         "accessType": "offline",
         "tokenUrl": "https://api.dropboxapi.com/oauth2/token"
