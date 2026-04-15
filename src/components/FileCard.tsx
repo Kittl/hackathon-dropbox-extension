@@ -23,6 +23,7 @@ interface Props {
  * - Other file types: rendered as disabled/greyed-out.
  * - Shows a thumbnail when available, otherwise falls back to a type icon.
  * - Overlays a spinner while the file is being added to the canvas.
+ * - Shows the full file/folder name as a native tooltip when hovering the title.
  */
 export function FileCard({ file: f, thumbnail, isAdding, filesOnlyMode, onOpenFolder, onAddToCanvas }: Props) {
   const isFolder = f['.tag'] === 'folder';
@@ -46,7 +47,7 @@ export function FileCard({ file: f, thumbnail, isAdding, filesOnlyMode, onOpenFo
             </div>
           </div>
         )}
-        <span className="file-card-name">{f.name}</span>
+        <span className="file-card-name" title={f.name}>{f.name}</span>
       </Card>
 
       {isAdding && (
