@@ -1,5 +1,7 @@
-import { Button, Spinner, Text } from '@kittl/ui-react';
+import { Spinner, Text } from '@kittl/ui-react';
 
+import { ConnectPanel } from './components/ConnectPanel';
+import { EmptyState } from './components/EmptyState';
 import { FileGrid } from './components/FileGrid';
 import { Header } from './components/Header';
 import { useDropbox } from './hooks/useDropbox';
@@ -27,15 +29,11 @@ export function App() {
       />
 
       {!dbx.token ? (
-        <div className="connect-panel">
-          <Button variant="primary" size="m" onClick={dbx.connect} disabled={dbx.loading}>
-            {dbx.loading ? 'Connecting…' : 'Connect Dropbox'}
-          </Button>
-        </div>
+        <ConnectPanel loading={dbx.loading} onConnect={dbx.connect} />
       ) : dbx.loading ? (
         <div className="center"><Spinner /></div>
       ) : dbx.files.length === 0 ? (
-        <Text variant="p2" color="secondary">No files found.</Text>
+        <EmptyState />
       ) : (
         <FileGrid
           files={dbx.files}

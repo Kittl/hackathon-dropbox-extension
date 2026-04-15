@@ -231,7 +231,7 @@ export function useDropbox() {
     connect,
     disconnect,
     // Navigation — derived values computed here so App needs no logic
-    title: filesOnlyMode ? 'All Files' : (pathStack[pathStack.length - 1]?.name ?? 'Dropbox Files'),
+    title: filesOnlyMode ? 'All Files' : (pathStack[pathStack.length - 1]?.name ?? 'Files'),
     showBack: !filesOnlyMode && pathStack.length > 0,
     goBack,
     // Files
