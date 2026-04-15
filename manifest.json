@@ -1,13 +1,13 @@
 {
   "$schema": "https://api.kittl.com/extensions/manifest/schema.json",
-  "displayName": "test-ext-blesson",
-  "icon": "icon.svg",
-  "tagline": "test-ext-blesson for Kittl.",
+  "displayName": "Dropbox",
+  "icon": "icon-dropbox.svg",
+  "tagline": "Browse and add your Dropbox files to Kittl.",
   "installPage": {
-    "description": "Install test-ext-blesson to use this extension in Kittl.",
-    "coverImage": "icon.svg",
-    "termsAndConditionsLink": "https://example.com/terms",
-    "privacyPolicyLink": "https://example.com/privacy"
+    "description": "Connect your Dropbox account to browse and add images directly to your Kittl canvas.",
+    "coverImage": "icon-dropbox.svg",
+    "termsAndConditionsLink": "https://www.kittl.com/terms",
+    "privacyPolicyLink": "https://www.kittl.com/privacy"
   },
   "config": {
     "scopes": [
@@ -17,6 +17,15 @@
     "embed": {
       "mainAppPanel": {
         "path": "index.html"
+      }
+    },
+    "oauthProviders": {
+      "dropbox": {
+        "clientId": "qkcenabcj9he44a",
+        "scope": "files.metadata.read files.content.read account_info.read",
+        "authorizationUrl": "https://www.dropbox.com/oauth2/authorize",
+        "accessType": "offline",
+        "tokenUrl": "https://api.dropboxapi.com/oauth2/token"
       }
     }
   }
