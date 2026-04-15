@@ -1,4 +1,5 @@
 import { Button, Text } from '@kittl/ui-react';
+import dropboxMark from '../assets/icon-dropbox-mark.svg';
 
 interface Props {
   loading: boolean;
@@ -12,7 +13,7 @@ interface Props {
 export function ConnectPanel({ loading, onConnect }: Props) {
   return (
     <div className="connect-panel">
-      <img className="empty-state-icon" src="/icon-dropbox-mark.svg" alt="" aria-hidden />
+      <img className="empty-state-icon" src={dropboxMark} alt="" aria-hidden />
       <Text variant="p2" color="secondary" style={{ textAlign: 'center' }}>Get started by connecting your account.</Text>
       <Button variant="primary" size="m" onClick={onConnect} disabled={loading}>
         {loading ? 'Connecting…' : 'Connect Dropbox'}

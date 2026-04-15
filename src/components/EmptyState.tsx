@@ -1,4 +1,5 @@
 import { Text } from '@kittl/ui-react';
+import dropboxMark from '../assets/icon-dropbox-mark.svg';
 
 interface Props {
   /** Message shown below the icon. */
@@ -12,7 +13,7 @@ interface Props {
 export function EmptyState({ message = 'No files found.' }: Props) {
   return (
     <div className="empty-state">
-      <img className="empty-state-icon" src="/icon-dropbox-mark.svg" alt="" aria-hidden />
+      <img className="empty-state-icon" src={dropboxMark} alt="" aria-hidden />
       <Text variant="p2" color="secondary">{message}</Text>
     </div>
   );

@@ -106,14 +106,12 @@ html, body, #root {
 }
 
 .empty-state-icon {
-  width: 48px;
-  height: 48px;
+  width: 64px;
+  height: 64px;
   filter: grayscale(1) opacity(0.35);
 }
 
 .connect-panel .empty-state-icon {
-  width: 64px;
-  height: 64px;
   filter: none;
 }
 
