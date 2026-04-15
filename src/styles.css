@@ -151,11 +151,10 @@ html, body, #root {
 }
 
 .file-card-media-icon-inner {
-  width: 28px;
-  height: 28px;
   display: flex;
   align-items: center;
   justify-content: center;
+  margin-top: 18px;
 }
 
 .file-card-shimmer {
