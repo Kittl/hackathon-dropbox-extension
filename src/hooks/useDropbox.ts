@@ -106,9 +106,12 @@ export function useDropbox() {
     });
   }, []);
 
-  // Resolve Dropbox Business namespace so all API calls use the correct root
+  // Resolve Dropbox Business namespace so all API calls use the correct root.
+  // Set loading immediately so the spinner shows during namespace resolution
+  // and there's no flash of the empty state before file fetching begins.
   useEffect(() => {
     if (!token) { setNsId('pending'); return; }
+    setLoading(true);
     getHomeNamespaceId(token).then(setNsId).catch(() => setNsId(null));
   }, [token]);
 

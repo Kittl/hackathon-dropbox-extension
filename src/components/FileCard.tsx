@@ -1,4 +1,4 @@
-import { documentCopy, folder, video } from '@kittl/ui-icons';
+import { documentCopy, folder } from '@kittl/ui-icons';
 import { Card, Icon, Spinner } from '@kittl/ui-react';
 import type { DbxEntry } from '../lib/dropbox';
 import { canAddToCanvas, isVideo } from '../lib/fileHelpers';
@@ -29,24 +29,30 @@ export function FileCard({ file: f, thumbnail, isAdding, filesOnlyMode, onOpenFo
   const isFolder = f['.tag'] === 'folder';
   const addable = canAddToCanvas(f);
   const interactive = isFolder || addable;
+  /** True for files that Dropbox can generate a thumbnail for (images & videos). */
+  const canHaveThumbnail = !isFolder && (addable || isVideo(f.name));
 
   const handleClick = isFolder && !filesOnlyMode
     ? () => onOpenFolder(f)
     : addable ? () => onAddToCanvas(f)
     : undefined;
 
+  const media = thumbnail ? (
+    <img slot="media" src={thumbnail} alt={f.name} style={{ width: '100%', height: 72, objectFit: 'cover', display: 'block' }} />
+  ) : canHaveThumbnail ? (
+    <div slot="media" className="file-card-shimmer" />
+  ) : (
+    <div slot="media" className="file-card-media-icon">
+      <div className="file-card-media-icon-inner">
+        <Icon icon={isFolder ? folder : documentCopy} />
+      </div>
+    </div>
+  );
+
   return (
     <div className={`file-card-wrap${!interactive ? ' file-card-wrap--disabled' : ''}`}>
       <Card bordered interactive={interactive} disabled={!interactive} onCardClick={handleClick}>
-        {thumbnail ? (
-          <img slot="media" src={thumbnail} alt={f.name} style={{ width: '100%', height: 72, objectFit: 'cover', display: 'block' }} />
-        ) : (
-          <div slot="media" className="file-card-media-icon">
-            <div className="file-card-media-icon-inner">
-              <Icon icon={isFolder ? folder : isVideo(f.name) ? video : documentCopy} />
-            </div>
-          </div>
-        )}
+        {media}
         <span className="file-card-name" title={f.name}>{f.name}</span>
       </Card>
 
