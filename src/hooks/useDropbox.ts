@@ -1,241 +1,143 @@
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { kittl } from '@kittl/sdk';
 import { useToast } from '@kittl/ui-react';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { DBX_PROVIDER, FILES_ONLY_KEY, PAGE_SIZE } from '../constants';
-import type { DbxEntry } from '../lib/dropbox';
-import { getHomeNamespaceId, getTemporaryLink, getThumbnails, pollForChanges, streamFiles, uploadFile } from '../lib/dropbox';
+import type { DbxEntry, FilePage } from '../lib/dropbox';
+import {
+  fetchFilePage,
+  getHomeNamespaceId,
+  getTemporaryLink,
+  getThumbnails,
+  pollForChanges,
+  uploadFile,
+} from '../lib/dropbox';
 import { canAddToCanvas } from '../lib/fileHelpers';
-
-/**
- * Namespace resolution state:
- * - "pending" = not yet fetched
- * - string = resolved namespace ID (Business/Team accounts)
- * - null = personal account (no namespace header needed)
- */
-type NsState = string | null | 'pending';
 
 /**
  * Central hook for all Dropbox state, side effects, and actions.
  *
- * Responsibilities:
- * - Restoring the OAuth token from Kittl's cross-device auth storage on mount.
- * - Resolving the user's home namespace for Dropbox Business/Team accounts.
- * - Streaming file metadata page by page via an async generator.
- * - Load-on-scroll pagination (increases `displayCount` as the user scrolls).
- * - Lazy thumbnail fetching (only for items in the visible slice).
- * - Folder navigation with a path stack.
- * - Adding canvas-supported images to the Kittl design via `kittl.design.image.addImage`.
- * - Polling canvas selection every 500ms to drive the contextual export footer.
- * - Exporting selected canvas objects as PNG and uploading them to Dropbox.
+ * Server state (namespace, file listing) is managed by React Query.
+ * Local UI state (path stack, thumbnails, display count) stays in useState/useRef.
+ * The longpoll loop calls `queryClient.invalidateQueries` to trigger silent background
+ * refreshes when Dropbox detects remote changes.
  */
 export function useDropbox() {
+  const queryClient = useQueryClient();
   const { showToast } = useToast();
+
+  // ── Local UI state ────────────────────────────────────────────────────────────
   const [token, setToken] = useState<string | null>(null);
   const [initializing, setInitializing] = useState(true);
-  const [nsId, setNsId] = useState<NsState>('pending');
   const [currentPath, setCurrentPath] = useState('');
   const [pathStack, setPathStack] = useState<{ path: string; name: string }[]>([]);
-  const [files, setFiles] = useState<DbxEntry[]>([]);
   const [thumbnails, setThumbnails] = useState<Record<string, string>>({});
   const [displayCount, setDisplayCount] = useState(PAGE_SIZE);
-  const [filesOnlyMode, setFilesOnlyMode] = useState(() => localStorage.getItem(FILES_ONLY_KEY) === 'true');
-  const [loading, setLoading] = useState(false);
-  const [adding, setAdding] = useState<string | null>(null);
-  const [exporting, setExporting] = useState(false);
+  const [filesOnlyMode, setFilesOnlyMode] = useState(
+    () => localStorage.getItem(FILES_ONLY_KEY) === 'true',
+  );
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
-  const [error, setError] = useState<string | null>(null);
-  const [refreshTrigger, setRefreshTrigger] = useState(0);
   const scrollRef = useRef<HTMLDivElement>(null);
-  /** Tracks which file IDs have already had thumbnail requests sent. */
   const fetchedThumbIds = useRef(new Set<string>());
-  /** Final listing cursor used by the longpoll loop to detect remote changes. */
+  /** Final listing cursor — updated once all pages load, used by the longpoll loop. */
   const cursorRef = useRef<string | null>(null);
-  /**
-   * When true, the next file-loading effect run is a silent background refresh:
-   * existing files stay visible, no spinner shown, files replaced atomically.
-   */
-  const silentRefreshRef = useRef(false);
 
-  // Restore token from Kittl's cross-device storage on mount
+  // ── Token restoration ─────────────────────────────────────────────────────────
   useEffect(() => {
     const check = async () => {
       const resp = await kittl.auth.getAuthToken({ provider: DBX_PROVIDER });
       if (resp.isOk && resp.result?.access_token) setToken(resp.result.access_token as string);
       setInitializing(false);
     };
-    if (kittl.loaded) check();
-    else kittl.onReady(check);
+    if (kittl.loaded) check(); else kittl.onReady(check);
   }, []);
 
-  /** Clears all Dropbox state and revokes the stored token via Kittl auth. */
-  const disconnect = useCallback(() => {
-    kittl.auth.logout({ provider: DBX_PROVIDER });
-    localStorage.removeItem(FILES_ONLY_KEY);
-    setToken(null);
-    setNsId('pending');
-    setCurrentPath('');
-    setPathStack([]);
-    setFiles([]);
-    setThumbnails({});
+  // ── Namespace (React Query) ───────────────────────────────────────────────────
+  const nsQuery = useQuery({
+    queryKey: ['dbx-namespace', token],
+    queryFn: () => getHomeNamespaceId(token!),
+    enabled: !!token,
+    staleTime: Infinity,
+    retry: false,
+  });
+  // 'pending' while namespace is resolving; null for personal accounts; string for Business
+  const nsId = !token ? 'pending' : nsQuery.isLoading ? 'pending' : (nsQuery.data ?? null);
+
+  // ── File listing (React Query — cursor-based infinite pagination) ─────────────
+  const filesQuery = useInfiniteQuery({
+    queryKey: ['dbx-files', token, nsId, currentPath, filesOnlyMode],
+    queryFn: ({ pageParam }: { pageParam: string | undefined }) =>
+      fetchFilePage(token!, nsId as string | null, filesOnlyMode ? '' : currentPath, filesOnlyMode, pageParam),
+    initialPageParam: undefined as string | undefined,
+    getNextPageParam: (page: FilePage) => page.has_more ? page.cursor : undefined,
+    enabled: !!token && nsId !== 'pending',
+    staleTime: Infinity,
+    retry: false,
+  });
+
+  // Auto-fetch remaining pages as they become available (streaming feel)
+  useEffect(() => {
+    if (filesQuery.hasNextPage && !filesQuery.isFetchingNextPage) filesQuery.fetchNextPage();
+  }, [filesQuery.hasNextPage, filesQuery.isFetchingNextPage, filesQuery.fetchNextPage]);
+
+  // Flatten all pages into a sorted, filtered files array
+  const files = useMemo(() => {
+    const entries = filesQuery.data?.pages.flatMap((p) => p.entries) ?? [];
+    const filtered = filesOnlyMode ? entries.filter(canAddToCanvas) : entries;
+    return filesOnlyMode
+      ? [...filtered].sort((a, b) => +new Date(b.server_modified ?? 0) - +new Date(a.server_modified ?? 0))
+      : filtered;
+  }, [filesQuery.data, filesOnlyMode]);
+
+  // ── Context-change resets ─────────────────────────────────────────────────────
+  // Clear thumbnail state and reset pagination when the viewed context changes
+  useEffect(() => {
     setDisplayCount(PAGE_SIZE);
     fetchedThumbIds.current = new Set();
-    cursorRef.current = null;
-    silentRefreshRef.current = false;
-    setRefreshTrigger(0);
-    setFilesOnlyMode(false);
-    setError(null);
-  }, []);
+    setThumbnails({});
+  }, [currentPath, filesOnlyMode, token]);
 
-  /**
-   * Initiates the Dropbox OAuth PKCE flow via `kittl.auth`.
-   * On success, stores the access token in state (which triggers file loading).
-   */
-  const connect = useCallback(async () => {
-    setError(null);
-    setLoading(true);
-    try {
-      const startResp = await kittl.auth.startAuth({ provider: DBX_PROVIDER, generatePKCE: true });
-      if (!startResp.isOk) throw new Error('Auth failed.');
-      const { code, code_verifier } = startResp.result;
-      const exchangeResp = await kittl.auth.exchangeCode({ code, provider: DBX_PROVIDER, code_verifier });
-      if (!exchangeResp.isOk) throw new Error('Token exchange failed.');
-      setToken(exchangeResp.result?.access_token as string);
-    } catch (err) {
-      console.error('[Dropbox] connect failed:', err);
-      setError('Connection failed. Please try again.');
-    } finally {
-      setLoading(false);
+  // Reset cursor when context changes so the longpoll waits for the new final cursor
+  useEffect(() => { cursorRef.current = null; }, [currentPath, filesOnlyMode]);
+
+  // Capture the final cursor once all pages are loaded (needed for longpoll)
+  useEffect(() => {
+    if (!filesQuery.hasNextPage && filesQuery.data?.pages.length) {
+      cursorRef.current = filesQuery.data.pages.at(-1)!.cursor;
     }
-  }, []);
+  }, [filesQuery.hasNextPage, filesQuery.data?.pages]);
 
-  /**
-   * Toggles "Hide folders" mode.
-   * When enabled: navigates to root, lists all canvas-supported files recursively,
-   * sorted by modification date. Persists the selection in localStorage.
-   */
-  const toggleFilesOnlyMode = useCallback(() => {
-    setFilesOnlyMode((prev) => {
-      const next = !prev;
-      localStorage.setItem(FILES_ONLY_KEY, String(next));
-      if (next) { setCurrentPath(''); setPathStack([]); }
-      return next;
-    });
-  }, []);
-
-  // Resolve Dropbox Business namespace so all API calls use the correct root.
-  // Set loading immediately so the spinner shows during namespace resolution
-  // and there's no flash of the empty state before file fetching begins.
+  // ── 401 / session-expiry handling ─────────────────────────────────────────────
   useEffect(() => {
-    if (!token) { setNsId('pending'); return; }
-    setLoading(true);
-    getHomeNamespaceId(token).then(setNsId).catch(() => setNsId(null));
-  }, [token]);
-
-  // Stream file metadata — first page appears immediately, rest loads in background.
-  // When `silentRefreshRef.current` is true (longpoll or post-export refresh), existing
-  // files stay visible with no spinner; the list is replaced atomically once complete.
-  useEffect(() => {
-    if (!token || nsId === 'pending') return;
-    let cancelled = false;
-
-    const silent = silentRefreshRef.current;
-    silentRefreshRef.current = false;
-
-    if (!silent) {
-      setLoading(true);
-      setError(null);
-      setFiles([]);
-      setThumbnails({});
-      setDisplayCount(PAGE_SIZE);
-      fetchedThumbIds.current = new Set();
+    const err = filesQuery.error;
+    if (!err) return;
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg === '401' || msg.includes('invalid_access_token') || msg.includes('expired')) {
+      console.warn('[Dropbox] session expired, disconnecting');
+      kittl.auth.logout({ provider: DBX_PROVIDER });
+      setToken(null);
+      queryClient.clear();
     }
+  }, [filesQuery.error, queryClient]);
 
-    (async () => {
-      try {
-        const collected: DbxEntry[] = [];
-        let firstPage = true;
-
-        for await (const batch of streamFiles(
-          token, nsId, filesOnlyMode ? '' : currentPath, filesOnlyMode,
-          (cursor) => { cursorRef.current = cursor; },
-        )) {
-          if (cancelled) return;
-          collected.push(...(filesOnlyMode ? batch.filter(canAddToCanvas) : batch));
-
-          // For initial (non-silent) loads, render first page immediately
-          if (!silent && firstPage) {
-            setFiles(filesOnlyMode
-              ? [...collected].sort((a, b) => +new Date(b.server_modified ?? 0) - +new Date(a.server_modified ?? 0))
-              : [...collected]);
-            setLoading(false);
-            firstPage = false;
-          }
-        }
-
-        if (cancelled) return;
-
-        // Atomic swap with the complete dataset — avoids partial-list flicker on refresh
-        const sorted = filesOnlyMode
-          ? [...collected].sort((a, b) => +new Date(b.server_modified ?? 0) - +new Date(a.server_modified ?? 0))
-          : collected;
-        setFiles(sorted);
-
-        // On silent refresh: existing thumbnails stay visible (served from the module-level
-        // cache), new file IDs are not in fetchedThumbIds so the lazy-load effect picks
-        // them up naturally. No state resets needed — zero shimmer flash.
-
-        if (firstPage && !cancelled) setLoading(false);
-      } catch (err) {
-        if (cancelled) return;
-        const msg = err instanceof Error ? err.message : String(err);
-        if (msg === '401' || msg.includes('invalid_access_token') || msg.includes('expired')) {
-          console.warn('[Dropbox] session expired, disconnecting');
-          kittl.auth.logout({ provider: DBX_PROVIDER });
-          setToken(null);
-        } else {
-          setError(msg);
-        }
-        setLoading(false);
-      }
-    })();
-
-    return () => { cancelled = true; };
-  }, [token, nsId, currentPath, filesOnlyMode, refreshTrigger]);
-
-  // Load-on-scroll: increase displayCount when the user scrolls near the bottom
-  useEffect(() => {
-    const el = scrollRef.current;
-    if (!el || displayCount >= files.length) return;
-    const onScroll = () => {
-      if (el.scrollTop + el.clientHeight >= el.scrollHeight - 200)
-        setDisplayCount((c) => Math.min(c + PAGE_SIZE, files.length));
-    };
-    el.addEventListener('scroll', onScroll, { passive: true });
-    return () => el.removeEventListener('scroll', onScroll);
-  }, [displayCount, files.length]);
-
-  // Longpoll loop — silently refreshes the file list when Dropbox detects remote changes
+  // ── Longpoll loop ─────────────────────────────────────────────────────────────
   useEffect(() => {
     if (!token) return;
     let cancelled = false;
-
     const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
     const loop = async () => {
       while (!cancelled) {
         const cursor = cursorRef.current;
         if (!cursor) { await sleep(1000); continue; }
-
         try {
           const { changes, backoff } = await pollForChanges(cursor);
           if (cancelled) return;
           if (backoff) await sleep(backoff * 1000);
           if (changes) {
             console.log('[Dropbox] longpoll: changes detected, refreshing');
-            silentRefreshRef.current = true;
-            setRefreshTrigger((t) => t + 1);
-            // Give the refresh time to complete and update cursorRef before next poll
+            queryClient.invalidateQueries({ queryKey: ['dbx-files'] });
             await sleep(3000);
           }
         } catch (err) {
@@ -248,9 +150,21 @@ export function useDropbox() {
 
     loop();
     return () => { cancelled = true; };
-  }, [token]);
+  }, [token, queryClient]);
 
-  // Lazy thumbnails — only fetch for the currently visible slice to avoid large batch requests
+  // ── Load-on-scroll ────────────────────────────────────────────────────────────
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el || displayCount >= files.length) return;
+    const onScroll = () => {
+      if (el.scrollTop + el.clientHeight >= el.scrollHeight - 200)
+        setDisplayCount((c) => Math.min(c + PAGE_SIZE, files.length));
+    };
+    el.addEventListener('scroll', onScroll, { passive: true });
+    return () => el.removeEventListener('scroll', onScroll);
+  }, [displayCount, files.length]);
+
+  // ── Lazy thumbnails ───────────────────────────────────────────────────────────
   useEffect(() => {
     if (!token || !files.length) return;
     const toFetch = files.slice(0, displayCount).filter((f) => !fetchedThumbIds.current.has(f.id));
@@ -261,13 +175,63 @@ export function useDropbox() {
     });
   }, [token, files, displayCount]);
 
-  /** Navigates into a folder, pushing the current path onto the stack. */
+  // ── Canvas selection polling ──────────────────────────────────────────────────
+  useEffect(() => {
+    if (!token) { setSelectedIds([]); return; }
+    const tick = async () => {
+      const res = await kittl.state.getSelectedObjectsIds();
+      if (!res.isOk) return;
+      setSelectedIds((prev) => {
+        const next = res.result;
+        if (prev.length === next.length && prev.every((id, i) => id === next[i])) return prev;
+        return next;
+      });
+    };
+    tick();
+    const id = setInterval(tick, 500);
+    return () => clearInterval(id);
+  }, [token]);
+
+  // ── Auth mutations ────────────────────────────────────────────────────────────
+  const connectMutation = useMutation({
+    mutationFn: async () => {
+      const startResp = await kittl.auth.startAuth({ provider: DBX_PROVIDER, generatePKCE: true });
+      if (!startResp.isOk) throw new Error('Auth failed.');
+      const { code, code_verifier } = startResp.result;
+      const exchangeResp = await kittl.auth.exchangeCode({ code, provider: DBX_PROVIDER, code_verifier });
+      if (!exchangeResp.isOk) throw new Error('Token exchange failed.');
+      return exchangeResp.result?.access_token as string;
+    },
+    onSuccess: (accessToken) => setToken(accessToken),
+    onError: (err) => console.error('[Dropbox] connect failed:', err),
+  });
+
+  const disconnect = useCallback(() => {
+    kittl.auth.logout({ provider: DBX_PROVIDER });
+    localStorage.removeItem(FILES_ONLY_KEY);
+    queryClient.clear();
+    cursorRef.current = null;
+    setToken(null);
+    setCurrentPath('');
+    setPathStack([]);
+    setFilesOnlyMode(false);
+  }, [queryClient]);
+
+  // ── Navigation ────────────────────────────────────────────────────────────────
+  const toggleFilesOnlyMode = useCallback(() => {
+    setFilesOnlyMode((prev) => {
+      const next = !prev;
+      localStorage.setItem(FILES_ONLY_KEY, String(next));
+      if (next) { setCurrentPath(''); setPathStack([]); }
+      return next;
+    });
+  }, []);
+
   const openFolder = useCallback((f: DbxEntry) => {
     setPathStack((prev) => [...prev, { path: currentPath, name: f.name }]);
     setCurrentPath(f.path_lower);
   }, [currentPath]);
 
-  /** Navigates back to the previous folder by popping the path stack. */
   const goBack = useCallback(() => {
     setPathStack((prev) => {
       const next = [...prev];
@@ -276,84 +240,49 @@ export function useDropbox() {
     });
   }, []);
 
-  // Poll canvas selection every 500ms while connected — no push API exists in the SDK
-  useEffect(() => {
-    if (!token) { setSelectedIds([]); return; }
-    const tick = async () => {
-      const res = await kittl.state.getSelectedObjectsIds();
-      if (!res.isOk) return;
-      setSelectedIds((prev) => {
-        const next = res.result;
-        // Avoid re-render when the selection hasn't changed
-        if (prev.length === next.length && prev.every((id, i) => id === next[i])) return prev;
-        return next;
-      });
-    };
-    tick(); // run immediately so there's no initial 500ms delay
-    const id = setInterval(tick, 500);
-    return () => clearInterval(id);
-  }, [token]);
-
-  /**
-   * Exports the current canvas selection as PNG and uploads it to
-   * `/Kittl Exports/<timestamp>.png` in the user's Dropbox.
-   * Uses `autorename` so concurrent exports never overwrite each other.
-   */
-  const exportToDropbox = useCallback(async () => {
-    if (!token || !selectedIds.length || exporting) return;
-    setExporting(true);
-    try {
-      const exportRes = await kittl.design.canvas.getExport({
-        format: 'png',
-        target: { nodeIds: selectedIds },
-        dimensions: { multiplier: 2 },
-      });
-      if (!exportRes.isOk) {
-        console.error('[Export] getExport failed:', exportRes.error);
-        throw new Error('Export failed.');
-      }
-      if (!exportRes.result) throw new Error('Export returned empty result.');
-      const timestamp = new Date().toISOString().slice(0, 19).replace(/[T:]/g, '-');
-      await uploadFile(token, `/Kittl Exports/export-${timestamp}.png`, exportRes.result);
-      showToast('Exported to Dropbox!', 'success');
-      // Silently refresh so the newly exported file appears without a full reload
-      silentRefreshRef.current = true;
-      setRefreshTrigger((t) => t + 1);
-    } catch (err) {
-      console.error('[Export] exportToDropbox failed:', err);
-      showToast('Could not export to Dropbox.', 'error');
-    } finally {
-      setExporting(false);
-    }
-  }, [token, selectedIds, exporting]);
-
-  /**
-   * Fetches a temporary download link for the file and adds it to the Kittl
-   * canvas at the center of the viewport. Only canvas-supported images are
-   * accepted; the button is disabled for all other file types.
-   */
-  const addToCanvas = useCallback(async (f: DbxEntry) => {
-    if (!token || !canAddToCanvas(f) || adding) return;
-    setAdding(f.id);
-    setError(null);
-    try {
-      const link = await getTemporaryLink(token, f.id);
+  // ── File / canvas mutations ───────────────────────────────────────────────────
+  const addMutation = useMutation({
+    mutationFn: async (f: DbxEntry) => {
+      const link = await getTemporaryLink(token!, f.id);
       const result = await kittl.design.image.addImage({
         src: link,
         position: { relative: { to: 'viewport', location: 'center' } },
         size: { width: 400, height: 300 },
       });
-      if (!result.isOk) {
-        console.error('[Kittl] addImage failed:', result.error);
-        setError('Could not add image to canvas.');
-      }
-    } catch (err) {
-      console.error('[Dropbox] addToCanvas failed:', err);
-      setError('Could not add image to canvas.');
-    } finally {
-      setAdding(null);
-    }
-  }, [token, adding]);
+      if (!result.isOk) throw new Error('Could not add image to canvas.');
+    },
+    onError: (err) => console.error('[Dropbox] addToCanvas failed:', err),
+  });
+
+  const exportMutation = useMutation({
+    mutationFn: async () => {
+      const exportRes = await kittl.design.canvas.getExport({
+        format: 'png',
+        target: { nodeIds: selectedIds },
+        dimensions: { multiplier: 2 },
+      });
+      if (!exportRes.isOk) throw new Error('Export failed.');
+      if (!exportRes.result) throw new Error('Export returned empty result.');
+      const timestamp = new Date().toISOString().slice(0, 19).replace(/[T:]/g, '-');
+      await uploadFile(token!, `/Kittl Exports/export-${timestamp}.png`, exportRes.result);
+    },
+    onSuccess: () => {
+      showToast('Exported to Dropbox!', 'success');
+      // Invalidate file list so the exported file appears — React Query does a silent background refresh
+      queryClient.invalidateQueries({ queryKey: ['dbx-files'] });
+    },
+    onError: (err) => {
+      console.error('[Export] exportToDropbox failed:', err);
+      showToast('Could not export to Dropbox.', 'error');
+    },
+  });
+
+  // ── Derived state ─────────────────────────────────────────────────────────────
+  // isLoading = isPending && isFetching — true only on genuine first fetch, not background refetches
+  const loading = connectMutation.isPending || (!!token && (nsQuery.isLoading || filesQuery.isLoading));
+  const error = filesQuery.error instanceof Error ? filesQuery.error.message
+    : connectMutation.isError ? 'Connection failed. Please try again.'
+    : null;
 
   return {
     // Status
@@ -362,9 +291,9 @@ export function useDropbox() {
     error,
     // Auth
     token,
-    connect,
+    connect: () => connectMutation.mutate(),
     disconnect,
-    // Navigation — derived values computed here so App needs no logic
+    // Navigation
     title: filesOnlyMode ? 'All Files' : (pathStack[pathStack.length - 1]?.name ?? 'Files'),
     showBack: !filesOnlyMode && pathStack.length > 0,
     goBack,
@@ -375,12 +304,12 @@ export function useDropbox() {
     filesOnlyMode,
     toggleFilesOnlyMode,
     openFolder,
-    adding,
-    addToCanvas,
+    adding: addMutation.isPending ? (addMutation.variables as DbxEntry | undefined)?.id ?? null : null,
+    addToCanvas: (f: DbxEntry) => { if (!addMutation.isPending) addMutation.mutate(f); },
     // Export
     selectedIds,
-    exporting,
-    exportToDropbox,
+    exporting: exportMutation.isPending,
+    exportToDropbox: exportMutation.mutate,
     // Refs
     scrollRef,
   };

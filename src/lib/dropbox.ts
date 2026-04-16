@@ -80,37 +80,32 @@ export async function getHomeNamespaceId(token: string): Promise<string | null> 
   return (data?.root_info as Record<string, string>)?.home_namespace_id ?? null;
 }
 
+/** A single page of results from the Dropbox list_folder API. */
+export interface FilePage {
+  entries: DbxEntry[];
+  has_more: boolean;
+  cursor: string;
+}
+
 /**
- * Async generator that streams Dropbox folder entries page by page.
- * Yields the first page immediately so the UI can render without waiting
- * for the full listing to complete (important for large Dropbox accounts).
- *
- * When the full listing is complete (`has_more: false`), calls `onCursor`
- * with the final cursor so callers can use it for longpoll change detection.
+ * Fetches one page of Dropbox folder entries.
+ * Pass `cursor` to continue an existing listing; omit it to start from the beginning.
+ * Designed for use with `useInfiniteQuery` — each call fetches exactly one page.
  *
  * @param path - Dropbox path to list. Pass `""` for the root.
  * @param recursive - When true, recursively lists all subfolders.
- * @param onCursor - Called once with the final listing cursor after all pages load.
+ * @param cursor - Continuation cursor from the previous page, or `undefined` for page 1.
  */
-export async function* streamFiles(
+export async function fetchFilePage(
   token: string,
   nsId: string | null,
   path: string,
-  recursive = false,
-  onCursor?: (cursor: string) => void,
-): AsyncGenerator<DbxEntry[]> {
-  let data = await dbxPost<{ entries: DbxEntry[]; has_more: boolean; cursor: string }>(
-    URL.listFolder, token, { path, recursive }, nsId,
-  );
-  if (!data.has_more) onCursor?.(data.cursor);
-  yield data.entries;
-  while (data.has_more) {
-    data = await dbxPost(
-      URL.listFolderMore, token, { cursor: data.cursor }, nsId,
-    );
-    if (!data.has_more) onCursor?.(data.cursor);
-    yield data.entries;
-  }
+  recursive: boolean,
+  cursor?: string,
+): Promise<FilePage> {
+  return cursor
+    ? dbxPost<FilePage>(URL.listFolderMore, token, { cursor }, nsId)
+    : dbxPost<FilePage>(URL.listFolder, token, { path, recursive }, nsId);
 }
 
 /**
