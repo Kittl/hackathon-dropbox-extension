@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { DBX_PROVIDER, FILES_ONLY_KEY, PAGE_SIZE } from '../constants';
 import type { DbxEntry } from '../lib/dropbox';
-import { getHomeNamespaceId, getTemporaryLink, getThumbnails, streamFiles, uploadFile } from '../lib/dropbox';
+import { getHomeNamespaceId, getTemporaryLink, getThumbnails, pollForChanges, streamFiles, uploadFile } from '../lib/dropbox';
 import { canAddToCanvas } from '../lib/fileHelpers';
 
 /**
@@ -45,9 +45,17 @@ export function useDropbox() {
   const [exporting, setExporting] = useState(false);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [refreshTrigger, setRefreshTrigger] = useState(0);
   const scrollRef = useRef<HTMLDivElement>(null);
   /** Tracks which file IDs have already had thumbnail requests sent. */
   const fetchedThumbIds = useRef(new Set<string>());
+  /** Final listing cursor used by the longpoll loop to detect remote changes. */
+  const cursorRef = useRef<string | null>(null);
+  /**
+   * When true, the next file-loading effect run is a silent background refresh:
+   * existing files stay visible, no spinner shown, files replaced atomically.
+   */
+  const silentRefreshRef = useRef(false);
 
   // Restore token from Kittl's cross-device storage on mount
   useEffect(() => {
@@ -72,6 +80,9 @@ export function useDropbox() {
     setThumbnails({});
     setDisplayCount(PAGE_SIZE);
     fetchedThumbIds.current = new Set();
+    cursorRef.current = null;
+    silentRefreshRef.current = false;
+    setRefreshTrigger(0);
     setFilesOnlyMode(false);
     setError(null);
   }, []);
@@ -121,31 +132,59 @@ export function useDropbox() {
     getHomeNamespaceId(token).then(setNsId).catch(() => setNsId(null));
   }, [token]);
 
-  // Stream file metadata — first page appears immediately, rest loads in background
+  // Stream file metadata — first page appears immediately, rest loads in background.
+  // When `silentRefreshRef.current` is true (longpoll or post-export refresh), existing
+  // files stay visible with no spinner; the list is replaced atomically once complete.
   useEffect(() => {
     if (!token || nsId === 'pending') return;
     let cancelled = false;
-    setLoading(true);
-    setError(null);
-    setFiles([]);
-    setThumbnails({});
-    setDisplayCount(PAGE_SIZE);
-    fetchedThumbIds.current = new Set();
+
+    const silent = silentRefreshRef.current;
+    silentRefreshRef.current = false;
+
+    if (!silent) {
+      setLoading(true);
+      setError(null);
+      setFiles([]);
+      setThumbnails({});
+      setDisplayCount(PAGE_SIZE);
+      fetchedThumbIds.current = new Set();
+    }
 
     (async () => {
       try {
+        const collected: DbxEntry[] = [];
         let firstPage = true;
-        for await (const batch of streamFiles(token, nsId, filesOnlyMode ? '' : currentPath, filesOnlyMode)) {
+
+        for await (const batch of streamFiles(
+          token, nsId, filesOnlyMode ? '' : currentPath, filesOnlyMode,
+          (cursor) => { cursorRef.current = cursor; },
+        )) {
           if (cancelled) return;
-          setFiles((prev) => {
-            const next = [...prev, ...(filesOnlyMode ? batch.filter(canAddToCanvas) : batch)];
-            // In "Hide folders" mode, sort all files newest-first by modification date
-            return filesOnlyMode
-              ? next.sort((a, b) => +new Date(b.server_modified ?? 0) - +new Date(a.server_modified ?? 0))
-              : next;
-          });
-          if (firstPage) { setLoading(false); firstPage = false; }
+          collected.push(...(filesOnlyMode ? batch.filter(canAddToCanvas) : batch));
+
+          // For initial (non-silent) loads, render first page immediately
+          if (!silent && firstPage) {
+            setFiles(filesOnlyMode
+              ? [...collected].sort((a, b) => +new Date(b.server_modified ?? 0) - +new Date(a.server_modified ?? 0))
+              : [...collected]);
+            setLoading(false);
+            firstPage = false;
+          }
         }
+
+        if (cancelled) return;
+
+        // Atomic swap with the complete dataset — avoids partial-list flicker on refresh
+        const sorted = filesOnlyMode
+          ? [...collected].sort((a, b) => +new Date(b.server_modified ?? 0) - +new Date(a.server_modified ?? 0))
+          : collected;
+        setFiles(sorted);
+
+        // On silent refresh: existing thumbnails stay visible (served from the module-level
+        // cache), new file IDs are not in fetchedThumbIds so the lazy-load effect picks
+        // them up naturally. No state resets needed — zero shimmer flash.
+
         if (firstPage && !cancelled) setLoading(false);
       } catch (err) {
         if (cancelled) return;
@@ -162,7 +201,7 @@ export function useDropbox() {
     })();
 
     return () => { cancelled = true; };
-  }, [token, nsId, currentPath, filesOnlyMode]);
+  }, [token, nsId, currentPath, filesOnlyMode, refreshTrigger]);
 
   // Load-on-scroll: increase displayCount when the user scrolls near the bottom
   useEffect(() => {
@@ -175,6 +214,41 @@ export function useDropbox() {
     el.addEventListener('scroll', onScroll, { passive: true });
     return () => el.removeEventListener('scroll', onScroll);
   }, [displayCount, files.length]);
+
+  // Longpoll loop — silently refreshes the file list when Dropbox detects remote changes
+  useEffect(() => {
+    if (!token) return;
+    let cancelled = false;
+
+    const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+    const loop = async () => {
+      while (!cancelled) {
+        const cursor = cursorRef.current;
+        if (!cursor) { await sleep(1000); continue; }
+
+        try {
+          const { changes, backoff } = await pollForChanges(cursor);
+          if (cancelled) return;
+          if (backoff) await sleep(backoff * 1000);
+          if (changes) {
+            console.log('[Dropbox] longpoll: changes detected, refreshing');
+            silentRefreshRef.current = true;
+            setRefreshTrigger((t) => t + 1);
+            // Give the refresh time to complete and update cursorRef before next poll
+            await sleep(3000);
+          }
+        } catch (err) {
+          if (cancelled) return;
+          console.warn('[Dropbox] longpoll error, retrying in 15s:', err);
+          await sleep(15000);
+        }
+      }
+    };
+
+    loop();
+    return () => { cancelled = true; };
+  }, [token]);
 
   // Lazy thumbnails — only fetch for the currently visible slice to avoid large batch requests
   useEffect(() => {
@@ -242,6 +316,9 @@ export function useDropbox() {
       const timestamp = new Date().toISOString().slice(0, 19).replace(/[T:]/g, '-');
       await uploadFile(token, `/Kittl Exports/export-${timestamp}.png`, exportRes.result);
       showToast('Exported to Dropbox!', 'success');
+      // Silently refresh so the newly exported file appears without a full reload
+      silentRefreshRef.current = true;
+      setRefreshTrigger((t) => t + 1);
     } catch (err) {
       console.error('[Export] exportToDropbox failed:', err);
       showToast('Could not export to Dropbox.', 'error');
