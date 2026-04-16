@@ -89,7 +89,7 @@ html, body, #root {
 
 .file-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(80px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(100px, 1fr));
   gap: var(--spacing-8);
   padding: var(--spacing-4) 0;
 }
